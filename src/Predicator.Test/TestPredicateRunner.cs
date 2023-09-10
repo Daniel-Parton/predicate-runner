@@ -11,43 +11,46 @@ namespace Predicator.Test
         GreaterThan1
     }
 
-    public class TestPredicateRunnerData
+    public class TestPredicateContext
     {
         public string Text { get; set; }
         public decimal Number { get; set; }
     }
 
-    public class TestPredicateRunner : PredicateRunner<TestPredicateType, TestPredicateRunnerData>
+    public class TestPredicateRunner : PredicateRunner<TestPredicateContext>
     {
-        public TestPredicateRunner(IEnumerable<PredicateGroup<TestPredicateType>> groups) : base(groups) { }
+        public TestPredicateRunner(PredicateFilter<Predicate> filter) : base(filter) { }
 
-        public TestPredicateRunner(IEnumerable<PredicateModel<TestPredicateType>> models) : base(models)
+        public TestPredicateRunner(
+            IEnumerable<PredicateModel<Predicate>> models,
+            PredicateJoiner joiner = PredicateJoiner.And) : base(models, joiner)
         {
         }
 
-        public TestPredicateRunner(IEnumerable<Predicate<TestPredicateType>> predicates) : base(predicates)
+        public TestPredicateRunner(
+            IEnumerable<Predicate> predicates,
+            PredicateJoiner joiner = PredicateJoiner.And) : base(predicates, joiner)
         {
         }
 
-        protected override Task<bool> EvaluateAsync(Predicate<TestPredicateType> predicate, TestPredicateRunnerData data)
+        protected override Task<bool> EvaluateAsync(Predicate predicate, TestPredicateContext data)
         {
-            var passes = false;
-            switch (predicate.Type)
+            if (!Enum.TryParse<TestPredicateType>(predicate.Type, out var type))
+            {
+                return Task.FromResult(false);
+            }
+
+            switch (type)
             {
                 case TestPredicateType.TextEquals:
-                    passes = data.Text.Equals(predicate.Options.StringValue1);
-                    break;
+                    return Task.FromResult( data.Text.Equals(predicate.Options.StringValue1));
                 case TestPredicateType.TextDoesNotEqual:
-                    passes = !data.Text.Equals(predicate.Options.StringValue1);
-                    break;
+                    return Task.FromResult(!data.Text.Equals(predicate.Options.StringValue1));
                 case TestPredicateType.GreaterThan1:
-                    passes = data.Number > 1;
-                    break;
+                    return Task.FromResult(data.Number > 1);
                 default:
                     throw new ArgumentOutOfRangeException();
             }
-
-            return Task.FromResult(passes);
         }
     }
 }

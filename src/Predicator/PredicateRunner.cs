@@ -1,98 +1,150 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Predicator
 {
-    public abstract class PredicateRunner<TPredicateType, TEvaluateData> where TPredicateType : struct, IConvertible
+    public abstract class PredicateRunner<TPredicate, TContext> where TPredicate : Predicate
     {
-        public IEnumerable<PredicateGroup<TPredicateType>> Groups { get; set; }
+        public PredicateFilter<TPredicate> Filter { get; }
         public bool IsValid { get; set; }
 
-        protected PredicateRunner(IEnumerable<PredicateGroup<TPredicateType>> groups)
+        protected PredicateRunner(PredicateFilter<TPredicate> filter)
         {
-            Groups = groups ?? new List<PredicateGroup<TPredicateType>>();
+            Filter = filter;
             IsValid = true;
         }
 
-        protected PredicateRunner(IEnumerable<PredicateModel<TPredicateType>> models)
+        protected PredicateRunner(IEnumerable<PredicateModel<TPredicate>> models, PredicateJoiner joiner = PredicateJoiner.And)
         {
-            Groups = new List<PredicateGroup<TPredicateType>>
+            Filter = new PredicateFilter<TPredicate>
             {
-                new PredicateGroup<TPredicateType> {Models = new List<PredicateModel<TPredicateType>>(models)}
+                Joiner = joiner,
+                Models = new List<PredicateModel<TPredicate>>(models),
             };
             IsValid = true;
         }
 
-        protected PredicateRunner(IEnumerable<Predicate<TPredicateType>> predicates)
+        protected PredicateRunner(IEnumerable<TPredicate> predicates, PredicateJoiner joiner = PredicateJoiner.And)
         {
-            Groups = new List<PredicateGroup<TPredicateType>>(new[]
+            Filter = new PredicateFilter<TPredicate>
             {
-                new PredicateGroup<TPredicateType> {
-                    After = PredicateJoiner.And,
-                    Models = new List<PredicateModel<TPredicateType>>(new []
+                Models = new List<PredicateModel<TPredicate>>
+                {
+                    new PredicateModel<TPredicate>
                     {
-                        new PredicateModel<TPredicateType>
-                        {
-                            After = PredicateJoiner.And,
-                            Predicates = new List<Predicate<TPredicateType>>(predicates)
-                        }
-                    })},
-            });
+                        Joiner = joiner,
+                        Predicates = new List<TPredicate>(predicates)
+                    }
+                }
+            };
             IsValid = true;
         }
 
 
-        public async Task<bool> EvaluateAsync(TEvaluateData data)
+        public Task<bool> EvaluateAsync(TContext context)
         {
-            if (!IsValid) return false;
+            if (!IsValid) return Task.FromResult(false);
 
-            var evaluatedGroups = new List<(bool, PredicateJoiner)>();
+            var runnableModels = (Filter.Models ?? new List<PredicateModel<TPredicate>>())
+                .Where(x => x.CanRun)
+                .ToList();
 
-            foreach (var group in Groups)
+            //Bail if no filters provided
+            if (!runnableModels.Any())
             {
-                var evaluatedModels = new List<(bool, PredicateJoiner)>();
-                foreach (var model in group.Models)
-                {
-                    var modelIsValid = true;
-                    foreach (var predicate in model.Predicates)
-                    {
-                        modelIsValid = await EvaluateAsync(predicate, data);
-                        if (!modelIsValid) break;
-                    }
-                    evaluatedModels.Add((modelIsValid, model.After));
-                }
-
-                var groupIsValid = CheckEvaluatedPredicates(evaluatedModels);
-                evaluatedGroups.Add((groupIsValid, group.After));
+                return Task.FromResult(true);
             }
 
-            var allGroupsValid = CheckEvaluatedPredicates(evaluatedGroups);
-            return allGroupsValid;
+            return EvaluateModels(context, runnableModels, Filter.Joiner);
         }
 
-        private bool CheckEvaluatedPredicates(List<(bool, PredicateJoiner)> evaluatedPredicates)
+        Task<bool> EvaluateModels(TContext context, List<PredicateModel<TPredicate>> models, PredicateJoiner joiner)
         {
-            var evaluation = true;
-            var nextJoiner = PredicateJoiner.And;
-            foreach (var evaluatedPredicate in evaluatedPredicates)
+            return EvaluateCollectionAsync(models.Select<PredicateModel<TPredicate>, Func<Task<bool>>>(model =>
             {
-                var isAnd = nextJoiner == PredicateJoiner.And;
-                if (isAnd)
-                {
-                    evaluation = evaluation && evaluatedPredicate.Item1;
-                }
-                else
-                {
-                    evaluation = evaluation || evaluatedPredicate.Item1;
-                }
+                return () => EvaluatePredicates(context, model.Predicates, model.Joiner);
+            }), joiner);
+        }
 
-                nextJoiner = evaluatedPredicate.Item2;
+        Task<bool> EvaluatePredicates(TContext context, List<TPredicate> predicates, PredicateJoiner joiner)
+        {
+            return EvaluateCollectionAsync(predicates.Select<TPredicate, Func<Task<bool>>>(predicate =>
+            {
+                return () => EvaluateAsync(predicate, context);
+            }), joiner);
+        }
+
+        protected abstract Task<bool> EvaluateAsync(TPredicate predicate, TContext context);
+
+        Task<bool> EvaluateCollectionAsync(
+            IEnumerable<Func<Task<bool>>> evaluations,
+            PredicateJoiner joiner)
+        {
+            //Skip if we have no predicates
+            if (evaluations == null || !evaluations.Any())
+            {
+                return Task.FromResult(true);
             }
 
-            return evaluation;
+            if (joiner == PredicateJoiner.And)
+            {
+                return EvaluateCollectionForAndAsync(evaluations);
+            }
+
+            return EvaluateCollectionForOrAsync(evaluations);
         }
 
-        protected abstract Task<bool> EvaluateAsync(Predicate<TPredicateType> predicate, TEvaluateData data);
+        static async Task<bool> EvaluateCollectionForOrAsync(
+            IEnumerable<Func<Task<bool>>> evaluations)
+        {
+            foreach (var evaluation in evaluations)
+            {
+                var success = await evaluation();
+
+                //If any predicate is valid we should short circuit true here
+                if (success)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        async Task<bool> EvaluateCollectionForAndAsync(IEnumerable<Func<Task<bool>>> evaluations)
+        {
+            foreach (var evaluation in evaluations)
+            {
+                var success = await evaluation();
+
+                if (!success)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    public abstract class PredicateRunner<TContext> : PredicateRunner<Predicate, TContext>
+    {
+        protected PredicateRunner(PredicateFilter<Predicate> filter) : base(filter)
+        {
+        }
+
+        protected PredicateRunner(
+            IEnumerable<PredicateModel<Predicate>> models,
+            PredicateJoiner joiner = PredicateJoiner.And) : base(models, joiner)
+        {
+        }
+
+        protected PredicateRunner(
+            IEnumerable<Predicate> predicates,
+            PredicateJoiner joiner = PredicateJoiner.And) : base(predicates, joiner)
+        {
+        }
     }
 }
