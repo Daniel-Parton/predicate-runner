@@ -1,32 +1,22 @@
 name: Build and Test
 
-on:
-  push:
-    branches:
-      - master
-
-env:
-  DOTNET_VERSION: "3.1.100" # set this to the dot net version to use
+on: [push]
 
 jobs:
   build-and-test:
-    runs-on: windows-2019
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet-version: ["6.0.x"]
     steps:
-      # Checkout the repo
-      - uses: actions/checkout@master
-
-      # Setup .NET Core SDK
-      - name: Setup .NET Core
-        uses: actions/setup-dotnet@v1
+      - uses: actions/checkout@v3
+      - name: Setup dotnet ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      # Build
-      - name: dotnet build
-        run: .\scripts\build.ps1
-        shell: powershell
-
-      # Build
-      - name: dotnet test
-        run: .\scripts\test.ps1
-        shell: powershell
+          dotnet-version: ${{ matrix.dotnet-version }}
+      - name: Install dependencies
+        run: dotnet restore
+      - name: Build
+        run: dotnet build
+      - name: Test with the dotnet CLI
+        run: dotnet test
